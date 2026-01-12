@@ -1,0 +1,10 @@
+FRAME_SKIP = 3
+RESIZE_W = 640
+RESIZE_H = 360
+
+THRESHOLD = 1
+COOLDOWN_SEC = 5
+
+REDIS_TTL = 10
+MONGO_URI = "mongodb://localhost:27017"
+
