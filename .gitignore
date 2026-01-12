@@ -1,0 +1,78 @@
+# -----------------------
+# OS / Editor files
+# -----------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# -----------------------
+# Python cache & builds
+# -----------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# -----------------------
+# Virtual environments
+# -----------------------
+venv/
+.env/
+.venv/
+env/
+
+# -----------------------
+# Logs
+# -----------------------
+*.log
+logs/
+
+# -----------------------
+# ML / CV artifacts
+# -----------------------
+runs/
+weights/
+*.pt
+*.onnx
+*.engine
+
+# -----------------------
+# Uploaded videos & data
+# -----------------------
+uploads/
+data/
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# -----------------------
+# Databases / caches
+# -----------------------
+*.db
+*.sqlite
+redis_dump.rdb
+
+# -----------------------
+# Secrets (VERY IMPORTANT)
+# -----------------------
+.env
+*.pem
+*.key
+config/secrets.yaml
+
+# -----------------------
+# Node / frontend (if any)
+# -----------------------
+node_modules/
+npm-debug.log
+dist/
+
+
