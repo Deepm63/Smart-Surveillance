@@ -1,5 +1,7 @@
 from pymongo import MongoClient
 from config import MONGO_URI
+import time
+
 
 class EventStore:
     def __init__(self, uri=MONGO_URI):
@@ -23,9 +25,37 @@ class EventStore:
             .sort("timestamp", -1)
             .limit(limit)
         )
-        
-        
-    def close(self):
-    	self.client.close()
 
+    def count_alerts_by_source(self):
+        pipeline = [
+            {"$group": {"_id": "$source_id", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}}
+        ]
+        return list(self.collection.aggregate(pipeline))
+
+    def count_alerts_over_time(self, hours=24):
+        since = time.time() - hours * 3600
+
+        pipeline = [
+            {"$match": {"timestamp": {"$gte": since}}},
+            {
+                "$group": {
+                    "_id": {
+                        "hour": {
+                            "$hour": {
+                                "$toDate": {
+                                    "$multiply": ["$timestamp", 1000]
+                                }
+                            }
+                        }
+                    },
+                    "count": {"$sum": 1}
+                }
+            },
+            {"$sort": {"_id.hour": 1}}
+        ]
+        return list(self.collection.aggregate(pipeline))
+
+    def close(self):
+        self.client.close()
 

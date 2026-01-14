@@ -1,5 +1,20 @@
-from flask import Flask, Response, request, jsonify, abort
+# ---------------- SYSTEM / HARDENING (MUST BE FIRST) ----------------
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+
 import cv2
+cv2.setNumThreads(1)
+
+# -------------------------------------------------------------------
+
+from flask import Flask, Response, request, jsonify, abort
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
+from services.camera_detector import detect_cameras
+
+
+import signal
+import sys
 
 from detector.yolo import YOLODetector
 from services.source_manager import SourceManager
@@ -8,36 +23,37 @@ from services.state_store import StateStore
 from services.event_store import EventStore
 from config import FRAME_SKIP, RESIZE_W, RESIZE_H
 
-
-import signal
-import sys
-
-def shutdown_handler(sig, frame):
-    print("Shutting down gracefully...")
-    manager.shutdown()          # release cameras
-    event_store.close()         # close Mongo
-    state_store.close()         # close Redis
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, shutdown_handler)
-signal.signal(signal.SIGTERM, shutdown_handler)
-
+# ---------------- APP INITIALIZATION ----------------
 
 app = Flask(__name__)
 
-# ---------------- Core Singletons ----------------
+# ✅ ENABLE CORS (THIS FIXES YOUR ISSUE)
+CORS(app, origins=["http://localhost:5173"])
+
+# ---------------- CORE SINGLETONS ----------------
+
 manager = SourceManager()
 detector = YOLODetector()
 alert_engine = AlertEngine()
 state_store = StateStore()
 event_store = EventStore()
 
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# -------------------------------------------------
+# ---------------- GRACEFUL SHUTDOWN ----------------
 
+def shutdown_handler(sig, frame):
+    print("Shutting down gracefully...")
+    manager.shutdown()
+    event_store.close()
+    state_store.close()
+    sys.exit(0)
 
-# ------------------------------------------------------
+signal.signal(signal.SIGINT, shutdown_handler)
+signal.signal(signal.SIGTERM, shutdown_handler)
 
+# ---------------- VIDEO GENERATOR ----------------
 
 def generate(camera, source_id):
     count = 0
@@ -49,7 +65,7 @@ def generate(camera, source_id):
         if count % FRAME_SKIP != 0:
             continue
 
-        # ---- Frame resizing ----
+        # ---- Resize ----
         frame = cv2.resize(frame, (RESIZE_W, RESIZE_H))
 
         # ---- YOLO inference ----
@@ -59,40 +75,38 @@ def generate(camera, source_id):
             print("YOLO error:", e)
             continue
 
-
         # ---- Alert evaluation ----
         alerts, violating_boxes = alert_engine.evaluate(source_id, detections)
-        
+
         # ---- Compute state ----
         person_count = sum(1 for d in detections if d[0] == "person")
         alert_active = len(violating_boxes) > 0
-        
-        # ---- Update Redis state ----
+
+        # ---- Update Redis ----
         state_store.update_camera_state(
             source_id,
             person_count=person_count,
             alert_active=alert_active
-        )    
+        )
 
-        # ---- Log alert EVENTS (cooldown-based) ----
+        # ---- Persist alert events (MongoDB) ----
         for alert in alerts:
             print("ALERT:", alert)
-            
             try:
-            	event_store.save_alert({
-                "source_id": source_id,
-                "type": alert["type"],
-                "message": alert["message"],
-                "person_count": int(alert["message"].split("(")[-1][:-1]),
-                "timestamp": alert["timestamp"]})
+                event_store.save_alert({
+                    "source_id": source_id,
+                    "type": alert["type"],
+                    "message": alert["message"],
+                    "person_count": int(alert["message"].split("(")[-1][:-1]),
+                    "timestamp": alert["timestamp"]
+                })
             except Exception as e:
-            	print("Mongo write failed:",e)
+                print("Mongo write failed:", e)
 
         # ---- Draw bounding boxes ----
         for cls, conf, (x1, y1, x2, y2) in detections:
             box_tuple = (x1, y1, x2, y2)
 
-            # RED if violating rule, else GREEN
             if box_tuple in violating_boxes:
                 color = (0, 0, 255)
                 label = f"{cls}:{conf:.2f} ALERT"
@@ -111,7 +125,7 @@ def generate(camera, source_id):
                 1
             )
 
-        # ---- Text alert (cooldown-based only) ----
+        # ---- Text alert overlay (cooldown-based) ----
         for alert in alerts:
             cv2.putText(
                 frame,
@@ -135,7 +149,6 @@ def generate(camera, source_id):
             + b"\r\n"
         )
 
-
 # ---------------- API ROUTES ----------------
 
 @app.route("/add_source", methods=["POST"])
@@ -144,7 +157,15 @@ def add_source():
     if not data or "path" not in data:
         return jsonify({"error": "path required"}), 400
 
-    source_id = manager.add_source(data["path"])
+    name = data.get("name")
+    path = data["path"]
+    if isinstance(path, dict):
+    	path = path.get("path")
+    source_id = manager.add_source(
+    path,
+    source_type="camera",
+    name=name)
+
     return jsonify({"source_id": source_id})
 
 
@@ -159,7 +180,6 @@ def video(source_id):
         mimetype="multipart/x-mixed-replace; boundary=frame"
     )
 
-
 @app.route("/remove_source/<int:source_id>", methods=["DELETE"])
 def remove_source(source_id):
     camera = manager.get_source(source_id)
@@ -169,11 +189,9 @@ def remove_source(source_id):
     manager.remove_source(source_id)
     return {"removed": source_id}
 
-
 @app.route("/sources")
 def list_sources():
     return {"sources": manager.list_sources()}
-
 
 @app.route("/state/<int:source_id>")
 def get_state(source_id):
@@ -186,11 +204,53 @@ def get_state(source_id):
 def get_events():
     source_id = request.args.get("source_id", type=int)
     limit = request.args.get("limit", default=50, type=int)
-
     events = event_store.get_events(source_id=source_id, limit=limit)
     return {"events": events}
 
-# ------------------------------------------------------
+@app.route("/upload", methods=["POST"])
+def upload_video():
+    if "file" not in request.files:
+        return {"error": "No file"}, 400
+
+    file = request.files["file"]
+    name = request.form.get("name")
+    filename = secure_filename(file.filename)
+
+    path = os.path.abspath(os.path.join(UPLOAD_DIR, filename))
+    file.save(path)
+
+    source_id = manager.add_source(
+        path,
+        source_type="video",
+        name=name
+    )
+
+    return {
+        "source_id": source_id,
+        "filename": filename
+    }
+
+@app.route("/detect_cameras")
+def detect_cameras_api():
+    return {"cameras": detect_cameras()}
+    
+    
+@app.route("/analytics/alerts/by_source")
+def analytics_by_source():
+    return {
+        "data": event_store.count_alerts_by_source()
+    }
+
+
+@app.route("/analytics/alerts/over_time")
+def analytics_over_time():
+    hours = request.args.get("hours", default=24, type=int)
+    return {
+        "data": event_store.count_alerts_over_time(hours)
+    }
+
+
+# ---------------- MAIN ----------------
 
 if __name__ == "__main__":
     app.run(debug=True)
